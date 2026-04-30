@@ -2,79 +2,167 @@ package NetworkLogic;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import ChessLogic.Color;
 import ChessLogic.GameSession;
 
+
 public class ChessServer {
-    private boolean gameActive;
-    private int port;
-    private ServerSocket socket;
-    private ClientHandler playerOne;
-    private ClientHandler playerTwo;
+     public static void main(String[] args) {
+    try {
+        new ChessServer(9000).start();
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+}
+    private final int port;
+    private ServerSocket serverSocket;
+
+  // All connected clients
+    private static ConcurrentHashMap<String, ClientHandler> clients = new ConcurrentHashMap<>();
+
+    // Manual matchmaking list
+    private static ConcurrentHashMap<String, ClientHandler> waitingList = new ConcurrentHashMap<>();
+
+    // Auto matchmaking queue
+    private static BlockingQueue<ClientHandler> autoQueue = new LinkedBlockingQueue<>();
 
     public ChessServer(int port){
         this.port = port;
     }
 
+   
     /**
      * Start() method used to establish the server via the server socket and
      * take connections to client sockets. Pairs the clients together and provides
      * a GameSession object followed by starting the threads
      */
     public void start() throws IOException {
-        try{
-            this.socket = new ServerSocket(this.port);
-            //establishes Server socket at port
+      
+        serverSocket = new ServerSocket(port);
+        System.out.println("Chess Server started on port " + port);
 
-            Socket clientSocket1 = this.socket.accept();
-            Socket clientSocket2 = this.socket.accept();
-            //calls accept for two sockets to connect
+        // Start matchmaking thread
+        new Thread(new MatchMaker()).start();
 
-            playerOne = new ClientHandler(clientSocket1);
-            playerTwo = new ClientHandler(clientSocket2);
-            /*
-            * Uses those sockets and uses them to construct the client handlers
-            * */
+        while (true) {
+            Socket socket = serverSocket.accept();
+            ClientHandler handler = new ClientHandler(socket);
+            new Thread(handler).start();
+        }
+    }
+      
+      //Client Managers 
 
-            playerOne.setOpponent(playerTwo);
-            playerTwo.setOpponent(playerOne);
-            /*
-            * Sets each player's clientHandlers with references
-            * for each other, so they can message each other
-            * */
+    public static synchronized boolean registerClient(String username, ClientHandler handler) {
+        if (clients.containsKey(username)) return false;
+        clients.put(username, handler);
+        return true;
+    }
 
-            playerOne.setColor(Color.WHITE);
-            playerTwo.setColor(Color.BLACK);
-            //sets the faction colors for the player's client handlers
+    public static void removeClient(ClientHandler player) {
+        if (player.getUsername() != null) {
+            clients.remove(player.getUsername());
+            waitingList.remove(player.getUsername());
+        }
+        autoQueue.remove(player);
+    }
+      // Matchmaking
+    //Supports auto queuing and a waiting list
+    public static void enterAutoQueue(ClientHandler player) throws InterruptedException {
+        removeFromQueues(player);
+        autoQueue.put(player);
+    }
 
-            GameSession game = new GameSession();
-            //creates a chess game Session
+    /**
+     * Method used to obtain a ClientHandler from autoQueue
+     */
+    public static ClientHandler takeFromQueue() throws InterruptedException {
+        return autoQueue.take();
+    }
 
-            playerOne.setGameSession(game);
-            playerTwo.setGameSession(game);
-            /*
-            * Provides the client's a reference to the game they are playing
-            * */
+    /**
+    * Method used to place a ClientHandler back into the autoQueue
+    * */
+    public static void putInQueue(ClientHandler handler) throws InterruptedException{
+        autoQueue.put(handler);
+    }
 
-            Thread threadP1 = new Thread(playerOne);
-            Thread threadP2 = new Thread(playerTwo);
 
-            threadP1.start();
-            threadP2.start();
-            //Starts the threads to run
+    public static void enterWaitingList(ClientHandler player) {
+        removeFromQueues(player);
+        waitingList.put(player.getUsername(), player);
+    }
 
-            threadP1.join();
-            threadP2.join();
-            /*
-            * Joins the threads to the main thread of the server, this stops the server from
-            * turning off to early before the clientHandlers ie game is done
-            * */
+    /**
+     *Method used to obtain String version of the waiting list
+     *@Returns String of the waiting list to be used to send to Clients
+    */
+    public static String getWaitingList(String requester) {
+        StringBuilder sb = new StringBuilder("WAITING PLAYERS: ");
+        for (String name : waitingList.keySet()) {
+            if (!name.equals(requester)) {
+                sb.append(name).append(" ");
+            }
+        }
+        return sb.toString();
+    }
 
-        }catch(IOException e){
-            throw new IOException(e);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+    public static ClientHandler getClient(String username){
+        return clients.get(username);
+    }
+
+    public  static synchronized boolean startMatch(ClientHandler p1, String opponentName) {
+        ClientHandler p2 = waitingList.get(opponentName);
+
+        if (p2 == null || p2.isInGame()) return false;
+
+        p2.setPendingChallenger(p1.getUsername());
+        p2.sendMessage("CHALLENGE: " + p1.getUsername() + " wants to play. Type ACCEPT or REJECT");
+        p1.sendMessage("Challenge sent to " + opponentName + ". Waiting for response...");
+
+        //removeFromQueues(p1);
+        //removeFromQueues(p2);
+
+        //startGame(p1, p2);
+        return true;
+    }
+
+    public static synchronized void startGame(ClientHandler p1, ClientHandler p2) {
+        GameSession game = new GameSession();
+
+        p1.setOpponent(p2);
+        p2.setOpponent(p1);
+        double random = Math.random();
+
+        if(random > 0.5){
+            p1.setColor(Color.WHITE);
+            p2.setColor(Color.BLACK);
+        }else{
+            p1.setColor(Color.BLACK);
+            p2.setColor(Color.WHITE);
+        }
+        p1.setGameSession(game);
+        p2.setGameSession(game);
+
+        p1.setInGame(true);
+        p2.setInGame(true);
+
+        p1.sendMessage("MATCH_STARTED " + p2.getUsername());
+        p2.sendMessage("MATCH_STARTED " + p1.getUsername());
+    }
+
+
+    private static void removeFromQueues(ClientHandler player) {
+        autoQueue.remove(player);
+        if (player.getUsername() != null) {
+            waitingList.remove(player.getUsername());
         }
     }
 }
+      
+      
+      
